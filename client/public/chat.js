@@ -1,8 +1,7 @@
 const io       = require('socket.io-client');
 const electron = require('electron');
 
-const SERVER = "localhost";
-const PORT   = 3000;
+const { SERVER_URL, SOCKET_OPTIONS } = require('./config.js');
 
 $(function() {
   electron.ipcRenderer.send('get-user-data');
@@ -25,7 +24,7 @@ function load(userdata) {
   let privateKey = null;
 
   const publicKeys         = {};  // username → RSA PEM public key
-  const roomKeys           = {};  // roomId   → Buffer (plaintext AES-256 channel key)
+  const roomKeys           = {};  // roomId   → { version → Buffer } (plaintext AES-256 channel keys)
   const pendingChannelKeys = {};  // channelName → Buffer (key generated before server confirms room id)
   const rekeyingRooms      = new Set(); // roomIds currently rotating key — block sends
 
@@ -88,12 +87,25 @@ function load(userdata) {
     };
   }
 
-  // Private channel: returns {iv, authTag, ciphertext}
+  function setRoomKey(roomId, version, key) {
+    roomKeys[roomId] = roomKeys[roomId] || {};
+    roomKeys[roomId][version] = key;
+  }
+
+  // newest key version we have for a channel
+  function currentRoomKey(roomId) {
+    const versions = Object.keys(roomKeys[roomId] || {}).map(Number);
+    if (versions.length === 0) return null;
+    const version = Math.max(...versions);
+    return { version, key: roomKeys[roomId][version] };
+  }
+
+  // Private channel: returns {iv, authTag, ciphertext, keyVersion}
   // to have everything needed to decrypt
   function channelEncrypt(plaintext, roomId) {
-    const key = roomKeys[roomId];
-    if (!key) return null;
-    return aesEncrypt(plaintext, key);
+    const current = currentRoomKey(roomId);
+    if (!current) return null;
+    return { ...aesEncrypt(plaintext, current.key), keyVersion: current.version };
   }
 
   // Decrypt a message
@@ -107,7 +119,7 @@ function load(userdata) {
           if (!aesKey) return '[decryption failed]';
           return aesDecrypt(msg, aesKey);
         } else {
-          const key = roomKeys[roomId];
+          const key = (roomKeys[roomId] || {})[msg.keyVersion || 1];
           if (!key) return '[encrypted message]';
           return aesDecrypt(msg, key);
         }
@@ -128,7 +140,7 @@ function load(userdata) {
   $usernameLabel.text(username);
 
   let connected    = false;
-  let socket       = io(`ws://${SERVER}:${PORT}`, { transports: ['websocket'] });
+  let socket       = io(SERVER_URL, SOCKET_OPTIONS);
   let modalShowing = false;
 
   $('#addChannelModal').on('hide.bs.modal', () => { modalShowing = false; })
@@ -280,16 +292,20 @@ function load(userdata) {
     if (currentRoom.private && rekeyingRooms.has(currentRoom.id)) return;
     $inputMessage.val('');
 
+    // never fall back to plaintext in a private room
     let msgData;
     if (currentRoom.direct) {
       const other = currentRoom.members.find(m => m !== username);
-      const enc   = other ? dmEncrypt(text, other) : null;
-      msgData = enc || { content: text };
+      msgData = other ? dmEncrypt(text, other) : null;
     } else if (currentRoom.private) {
-      const enc = channelEncrypt(text, currentRoom.id);
-      msgData = enc || { content: text };
+      msgData = channelEncrypt(text, currentRoom.id);
     } else {
       msgData = { content: text };
+    }
+
+    if (!msgData) {
+      addNotice('Message not sent: no encryption key for this room.');
+      return;
     }
 
     socket.emit('new message', { username, room: currentRoom.id, ...msgData });
@@ -316,6 +332,14 @@ function load(userdata) {
     textual.append(user, ts, content);
     wrap.append(avatar, textual);
     $messages.append(wrap);
+    $messages[0].scrollTop = $messages[0].scrollHeight;
+  }
+
+  function addNotice(text) {
+    const notice = document.createElement('div');
+    notice.className   = 'message-notice';
+    notice.textContent = text;
+    $messages.append(notice);
     $messages[0].scrollTop = $messages[0].scrollHeight;
   }
 
@@ -348,26 +372,22 @@ function load(userdata) {
   window.joinChannel = joinChannel;
 
   function addToChannel(user) {
-    const encryptedRoomKey = (currentRoom && currentRoom.private && roomKeys[currentRoom.id] && publicKeys[user])
-      ? rsaEncrypt(publicKeys[user], roomKeys[currentRoom.id])
+    const current = currentRoom && currentRoom.private ? currentRoomKey(currentRoom.id) : null;
+    const encryptedRoomKey = (current && publicKeys[user])
+      ? rsaEncrypt(publicKeys[user], current.key)
       : null;
     socket.emit('add_user_to_channel', { channel: currentRoom.id, user, encryptedRoomKey });
   }
   window.addToChannel = addToChannel;
 
+  // the key rotation is done by a member who stays (see 'rekey_request')
   function leaveChannel() {
-    let rotatedKeys = null;
-    if (currentRoom && currentRoom.private && roomKeys[currentRoom.id]) {
-      const newKey          = crypto.randomBytes(32);
-      const remainingMembers = currentRoom.members.filter(m => m !== username);
-      rotatedKeys = {};
-      for (const member of remainingMembers) {
-        if (publicKeys[member]) rotatedKeys[member] = rsaEncrypt(publicKeys[member], newKey);
-      }
-    }
-    socket.emit('leave_channel', { id: currentRoom.id, rotatedKeys });
+    if (currentRoom) socket.emit('leave_channel', { id: currentRoom.id });
   }
   window.leaveChannel = leaveChannel;
+
+  $('#btn-leave').on('click', leaveChannel);
+  $('#btn-create-channel').on('click', addChannel);
 
   // ─── Keyboard ────────────────────────────────────────────────────────────────
 
@@ -387,9 +407,11 @@ function load(userdata) {
     updateChannels(data.publicChannels);
 
     if (data.roomKeys && privateKey) {
-      for (const [roomId, encKey] of Object.entries(data.roomKeys)) {
-        const key = decryptRoomKeyBlob(encKey);
-        if (key) roomKeys[parseInt(roomId)] = key;
+      for (const [roomId, versions] of Object.entries(data.roomKeys)) {
+        for (const [version, encKey] of Object.entries(versions)) {
+          const key = decryptRoomKeyBlob(encKey);
+          if (key) setRoomKey(parseInt(roomId), parseInt(version), key);
+        }
       }
     }
 
@@ -426,7 +448,7 @@ function load(userdata) {
     updateRoom(data.room);
     // If this is a private channel we just created, store its key
     if (data.room.private && pendingChannelKeys[data.room.name]) {
-      roomKeys[data.room.id] = pendingChannelKeys[data.room.name];
+      setRoomKey(data.room.id, data.room.keyVersion, pendingChannelKeys[data.room.name]);
       delete pendingChannelKeys[data.room.name];
     }
     if (data.moveto) setRoom(data.room.id);
@@ -438,22 +460,38 @@ function load(userdata) {
 
   socket.on('room_key_update', (data) => {
     const key = decryptRoomKeyBlob(data.encryptedKey);
-    if (key) roomKeys[data.roomId] = key;
+    if (key) setRoomKey(data.roomId, data.version, key);
     rekeyingRooms.delete(data.roomId);
+  });
+
+  // someone left a private channel we are in: generate a new key for the remaining members
+  socket.on('rekey_request', ({ roomId, version, members }) => {
+    const missing = members.filter(m => !publicKeys[m]);
+    if (missing.length > 0) {
+      console.error('Cannot rotate key, missing public keys for', missing);
+      return;
+    }
+    const newKey = crypto.randomBytes(32);
+    const keys   = {};
+    members.forEach(m => { keys[m] = rsaEncrypt(publicKeys[m], newKey); });
+    socket.emit('rotate_room_key', { roomId, version, keys });
+  });
+
+  socket.on('error_message', data => {
+    addNotice(data.message);
   });
 
   socket.on('remove_room', data => {
     removeRoom(data.room);
-    if (currentRoom && currentRoom.id === data.room) setRoom(0);
+    if (currentRoom && currentRoom.id === data.room) {
+      const next = rooms.find(Boolean);
+      if (next) setRoom(next.id);
+    }
   });
 
   socket.on('connect', () => {
     socket.emit('login', { name: userdata.name, password: userdata.password });
   });
 
-  socket.on('disconnect', () => { console.log('disconnect'); });
-
-  socket.on('reconnect', () => {
-    socket.emit('login', { name: userdata.name, password: userdata.password });
-  });
+  socket.on('disconnect', () => { connected = false; });
 }

@@ -1,5 +1,4 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
-const path = require('node:path');
 
 let userData = { name: false, password: false };
 let win = null;
@@ -14,6 +13,10 @@ function createWindow() {
         },
     });
 
+    // the app never opens other pages or windows
+    win.webContents.on('will-navigate', event => event.preventDefault());
+    win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+
     win.loadFile('public/login.html');
     return win;
 }
@@ -24,6 +27,10 @@ app.whenReady().then(() => {
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
+});
+
+app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
 });
 
 ipcMain.on('open-chat', (event, data) => {

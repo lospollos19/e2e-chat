@@ -244,3 +244,8 @@ CD2553
   display: block;
   font-size: 11pt;
 }
+.message-notice {
+  color: #888;
+  font-style: italic;
+  padding: 0.25em 1em;
+}
