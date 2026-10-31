@@ -6,6 +6,6 @@ export default defineConfig({
     schema: './src/db/schema.js',
     dialect: 'sqlite',
     dbCredentials: {
-        url: process.env.DB_FILE_NAME,
-},
+        url: process.env.DB_FILE_NAME || 'chat.db',
+    },
 });
