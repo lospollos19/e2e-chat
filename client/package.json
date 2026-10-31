@@ -1,19 +1,22 @@
 {
-  "name": "insecure-chat-client",
+  "name": "e2e-chat-client",
   "version": "1.0.0",
-  "description": "A simple insecure chat client",
+  "description": "Electron client of an end-to-end encrypted chat",
   "main": "main.js",
   "scripts": {
     "start": "electron ."
   },
-  "author": "",
+  "author": "lospollos19",
   "license": "MIT",
   "devDependencies": {
-    "electron": "^29.1.5"
+    "electron": "^45.2.1"
   },
   "dependencies": {
     "bootstrap": "^5.3.3",
     "jquery": "^3.7.1",
     "socket.io-client": "^4.7.5"
-  }
+  },
+  "contributors": [
+    "Jim Bauwens (original insecure-chat skeleton)"
+  ]
 }
