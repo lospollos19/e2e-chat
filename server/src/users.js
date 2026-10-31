@@ -1,10 +1,15 @@
-const { usersTable } = require('./db/schema.js');
+const { usersTable, roomMemberTable } = require('./db/schema.js');
 const { eq } = require('drizzle-orm');
-
-let users = {};
 const bcrypt = require('bcrypt')
-const jwt_token = require('jsonwebtoken')
+
+let users = Object.create(null);
 let initialized  = false
+
+// Brute-force protection: lock a username for a while after too many failed logins
+const MAX_FAILED_LOGINS = 5;
+const LOCK_MS           = 60 * 1000;
+const failedLogins      = new Map();
+const DUMMY_HASH        = bcrypt.hashSync('dummy password', 10);
 
 class User {
     constructor(_name, _publicKey = null) {
@@ -39,52 +44,72 @@ class User {
 
 }
 
-module.exports = (db) => ({
-    addUser: (name, password, publicKey, encryptedPrivateKey) => {
-        const hash = bcrypt.hashSync(password, 10);
-        const encPrivKeyStr = encryptedPrivateKey ? JSON.stringify(encryptedPrivateKey) : null;
-        db.insert(usersTable).values({
-            name,
-            password:              hash,
-            public_key:            publicKey            || null,
-            encrypted_private_key: encPrivKeyStr
-        }).run();
+module.exports = (db) => {
+    // the rooms a user is in are stored in room_member, so they survive a restart
+    const restoreUser = (name, publicKey) => {
         const user = new User(name, publicKey || null);
+        user.subscriptions = db.select().from(roomMemberTable)
+            .where(eq(roomMemberTable.userName, name)).all()
+            .map(m => m.roomId);
         users[name] = user;
         return user;
-    },
+    };
 
-    loadUser: (name) => {
-        const dbUser = db.select().from(usersTable).where(eq(usersTable.name, name)).get();
-        const user   = new User(name, dbUser?.public_key || null);
-        users[name]  = user;
-        return user;
-    },
+    return {
+        addUser: (name, password, publicKey, encryptedPrivateKey) => {
+            const hash = bcrypt.hashSync(password, 10);
+            const encPrivKeyStr = encryptedPrivateKey ? JSON.stringify(encryptedPrivateKey) : null;
+            db.insert(usersTable).values({
+                name,
+                password:              hash,
+                public_key:            publicKey            || null,
+                encrypted_private_key: encPrivKeyStr
+            }).run();
+            const user = new User(name, publicKey || null);
+            users[name] = user;
+            return user;
+        },
 
-    getUser: name => {
-        return users[name];
-    },
+        loadUser: (name) => {
+            const dbUser = db.select().from(usersTable).where(eq(usersTable.name, name)).get();
+            return restoreUser(name, dbUser?.public_key);
+        },
 
-    login: (name, password) => {
-        const user = db.select().from(usersTable).where(eq(usersTable.name, name)).get();
-        if (!user) return null
+        getUser: name => {
+            return typeof name === 'string' && Object.hasOwn(users, name) ? users[name] : undefined;
+        },
 
-        const match = bcrypt.compareSync(password, user.password)
-        if (!match) return null
+        // returns the db user, null for wrong credentials, or 'locked'
+        login: (name, password) => {
+            const attempts = failedLogins.get(name);
+            if (attempts && attempts.count >= MAX_FAILED_LOGINS && Date.now() - attempts.last < LOCK_MS)
+                return 'locked';
 
-        return user
-    },
+            const user = db.select().from(usersTable).where(eq(usersTable.name, name)).get();
+            // compare against a dummy hash for unknown users, so both cases take the same time
+            const hash  = user ? user.password : DUMMY_HASH;
+            const match = bcrypt.compareSync(password, hash)
 
-    getUsers: () => {
-        if (!initialized) {
-            const dbUsers = db.select().from(usersTable).all();
-            initialized = true;
-            dbUsers.forEach(u => {
-                if (!users[u.name]) {
-                    users[u.name] = new User(u.name, u.public_key || null);
-                }
-            });
+            if (!user || !match) {
+                const count = attempts && Date.now() - attempts.last < LOCK_MS ? attempts.count : 0;
+                failedLogins.set(name, { count: count + 1, last: Date.now() });
+                return null
+            }
+
+            failedLogins.delete(name);
+            return user
+        },
+
+        getUsers: () => {
+            if (!initialized) {
+                const dbUsers = db.select().from(usersTable).all();
+                initialized = true;
+                dbUsers.forEach(u => {
+                    if (!users[u.name])
+                        restoreUser(u.name, u.public_key);
+                });
+            }
+            return Object.values(users);
         }
-        return Object.values(users);
-    }
-})
+    };
+}

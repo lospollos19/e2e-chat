@@ -1,9 +1,7 @@
 const { roomsTable, roomMemberTable, messagesTable, roomKeysTable } = require('./db/schema.js');
 const { eq, and } = require('drizzle-orm');
-const {text, integer} = require("drizzle-orm/sqlite-core");
 
 const rooms = [];
-let roomIdCounter = 0;
 
 class Room {
     constructor(id, name, options) {
@@ -11,11 +9,14 @@ class Room {
         this.name =  name;
 
         this.description = options.description || "";
-      
+
         this.forceMembership = !!options.forceMembership;
         this.private         = !!options.private;
         this.direct          = !!options.direct;
-  
+
+        this.keyVersion = options.keyVersion || 1;
+        this.needsRekey = !!options.needsRekey;
+
         this.members = [];
         this.history = [];
     }
@@ -30,6 +31,11 @@ class Room {
 
     getMemberCount(){
         return this.members.length;
+    }
+
+    hasMember(user) {
+        const name = typeof user === 'string' ? user : user.name;
+        return this.members.indexOf(name) !== -1;
     }
 
     addMember(user) {
@@ -54,11 +60,6 @@ class Room {
     }
 }
 
-//return newRoom(name, user, {
-//    description: description,
-//    private: private
-//});
-
 module.exports = (db) => {
     const init = () => {
         const dbRooms = db.select().from(roomsTable).all();
@@ -67,7 +68,9 @@ module.exports = (db) => {
                 description: r.description,
                 forceMembership: !!r.force_membership,
                 private: !!r.is_private,
-                direct: !!r.is_direct
+                direct: !!r.is_direct,
+                keyVersion: r.key_version,
+                needsRekey: !!r.needs_rekey
             });
 
             const members = db.select().from(roomMemberTable)
@@ -83,12 +86,12 @@ module.exports = (db) => {
                 authTag:    m.authTag    || null,
                 ciphertext: m.ciphertext || null,
                 keys:       m.keys ? JSON.parse(m.keys) : null,
+                keyVersion: m.keyVersion || null,
                 time:       m.timestamp,
                 room:       r.id
             }));
 
             rooms[r.id] = room;
-            roomIdCounter = Math.max(roomIdCounter, r.id + 1);
         });
     };
 
@@ -96,12 +99,19 @@ module.exports = (db) => {
         init,
 
         addMemberToRoom: (username, room) => {
-            if (room.members.indexOf(username) !== -1) return;
+            if (room.hasMember(username)) return;
             db.insert(roomMemberTable).values({
                 roomId: room.id,
                 userName: username
-            }).run();
+            }).onConflictDoNothing().run();
             room.addMember(username);
+        },
+
+        removeMemberFromRoom: (username, room) => {
+            db.delete(roomMemberTable)
+                .where(and(eq(roomMemberTable.roomId, room.id), eq(roomMemberTable.userName, username)))
+                .run();
+            room.removeMember(username);
         },
 
         addRoom: (name, options) => {
@@ -113,7 +123,7 @@ module.exports = (db) => {
                 is_direct: 0
             }).run();
 
-            const id = result.lastInsertRowid;
+            const id = Number(result.lastInsertRowid);
             const room = new Room(id, name, options);
             rooms[id] = room;
             return room;
@@ -129,7 +139,7 @@ module.exports = (db) => {
                 is_direct: 1
             }).run();
 
-            const id = result.lastInsertRowid;
+            const id = Number(result.lastInsertRowid);
             const room = new Room(id, name, { direct: true, private: true });
             rooms[id] = room;
             return room;
@@ -139,18 +149,25 @@ module.exports = (db) => {
 
         getForcedRooms: () => rooms.filter(r => r.forceMembership),
 
-        getRoom: id => rooms[id],
+        getRoomsOfUser: name => rooms.filter(r => r.hasMember(name)),
+
+        // ids come from the client: anything else than an integer is unknown
+        getRoom: id => Number.isInteger(id) ? rooms[id] : undefined,
 
         getRoomByName: name => rooms.find(r => r && r.name === name),
 
-        storeRoomKey: (roomId, userName, encryptedKey) => {
+        storeRoomKey: (roomId, userName, version, encryptedKey) => {
             db.insert(roomKeysTable)
-                .values({ roomId, userName, encryptedKey })
-                .onConflictDoUpdate({ target: [roomKeysTable.roomId, roomKeysTable.userName], set: { encryptedKey } })
+                .values({ roomId, userName, version, encryptedKey })
+                .onConflictDoUpdate({
+                    target: [roomKeysTable.roomId, roomKeysTable.userName, roomKeysTable.version],
+                    set: { encryptedKey }
+                })
                 .run();
         },
 
-        deleteRoomKey: (roomId, userName) => {
+        // removes every key version of a member
+        deleteRoomKeys: (roomId, userName) => {
             db.delete(roomKeysTable)
                 .where(and(eq(roomKeysTable.roomId, roomId), eq(roomKeysTable.userName, userName)))
                 .run();
@@ -160,15 +177,30 @@ module.exports = (db) => {
             return db.select().from(roomKeysTable).where(eq(roomKeysTable.userName, userName)).all();
         },
 
+        setKeyVersion: (room, version) => {
+            db.update(roomsTable)
+                .set({ key_version: version, needs_rekey: 0 })
+                .where(eq(roomsTable.id, room.id))
+                .run();
+            room.keyVersion = version;
+            room.needsRekey = false;
+        },
+
+        setNeedsRekey: (room) => {
+            db.update(roomsTable).set({ needs_rekey: 1 }).where(eq(roomsTable.id, room.id)).run();
+            room.needsRekey = true;
+        },
+
         addMessageToRoom: (msgData, room, username, msgTime) => {
             db.insert(messagesTable).values({
                 roomId:     room.id,
                 userName:   username,
                 content:    msgData.content    || null,
                 iv:         msgData.iv         || null,
-                authTag:    msgData.authTag     || null,
-                ciphertext: msgData.ciphertext  || null,
+                authTag:    msgData.authTag    || null,
+                ciphertext: msgData.ciphertext || null,
                 keys:       msgData.keys ? JSON.stringify(msgData.keys) : null,
+                keyVersion: msgData.keyVersion || null,
                 timestamp:  msgTime
             }).run();
             room.addMessage({ username, ...msgData, time: msgTime, room: room.id });
