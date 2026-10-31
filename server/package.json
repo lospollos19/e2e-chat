@@ -1,26 +1,32 @@
 {
-  "name": "insecure-chat-server",
+  "name": "e2e-chat-server",
   "version": "1.0.0",
-  "description": "A simple insecure chat server",
+  "description": "Socket.IO server of an end-to-end encrypted chat",
   "main": "src/index.js",
-  "author": "Jim Bauwens",
+  "author": "lospollos19",
   "private": true,
   "license": "MIT",
   "dependencies": {
-    "@libsql/client": "^0.17.3",
     "bcrypt": "^6.0.0",
     "better-sqlite3": "^12.10.0",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
-    "express": "^4.19.2",
-    "jsonwebtoken": "^9.0.3",
     "socket.io": "^4.7.5"
   },
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "gen-cert": "mkdir -p certs && openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/key.pem -out certs/cert.pem -days 365 -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1",
+    "db:generate": "drizzle-kit generate",
+    "test": "node --test test/"
   },
   "devDependencies": {
     "drizzle-kit": "^0.31.10",
-    "tsx": "^4.22.3"
+    "socket.io-client": "^4.8.4"
+  },
+  "contributors": [
+    "Jim Bauwens (original insecure-chat skeleton)"
+  ],
+  "engines": {
+    "node": ">=20"
   }
 }
