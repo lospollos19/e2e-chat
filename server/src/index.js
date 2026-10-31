@@ -56,9 +56,10 @@ const isHex    = (v, max) => typeof v === 'string' && v.length > 0 && v.length <
 const isBase64 = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max && BASE64_RE.test(v);
 const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-function validPassword(p) {
-  return typeof p === 'string' && p.length >= 8 && p.length <= 128 &&
-    /[A-Z]/.test(p) && /[0-9]/.test(p) && /[^A-Za-z0-9]/.test(p);
+// The client sends a PBKDF2 secret derived from the password, never the password itself,
+// so the password policy can only be checked on the client
+function validAuthSecret(p) {
+  return typeof p === 'string' && p.length === 64 && HEX_RE.test(p);
 }
 
 function validPublicKey(k) {
@@ -495,8 +496,8 @@ io.on('connection', (socket) => {
     // Double check of the username and password
     if (typeof req.name !== 'string' || !USERNAME_RE.test(req.name))
       return socket.emit('register_error', { message: 'usernames are 3-20 letters, digits or _' });
-    if (!validPassword(req.password))
-      return socket.emit('register_error', { message: 'password does not meet requirements' });
+    if (!validAuthSecret(req.password))
+      return socket.emit('register_error', { message: 'invalid password' });
     if (!validPublicKey(req.publicKey) || !validEncryptedPrivateKey(req.encryptedPrivateKey))
       return socket.emit('register_error', { message: 'invalid key material' });
 

@@ -9,7 +9,8 @@ const path = require('node:path');
 const io = require('socket.io-client');
 
 const SERVER_DIR = path.join(__dirname, '..');
-const PASSWORD = 'Passw0rd!';
+// what the client sends: a PBKDF2 secret derived from the password
+const PASSWORD = crypto.pbkdf2Sync('Passw0rd!', 'e2e-chat-auth:test', 1000, 32, 'sha256').toString('hex');
 
 let tmp, cert, port, server;
 const sockets = [];
@@ -126,7 +127,7 @@ test('wrong passwords are rejected and the account gets locked', async () => {
   s.close();
 
   for (let i = 0; i < 5; i++) {
-    const bad = await login('locky', 'Wrong-pass1');
+    const bad = await login('locky', 'f'.repeat(64));
     assert.equal((await waitFor(bad, 'login_error')).message, 'invalid credentials');
   }
   const locked = await login('locky');

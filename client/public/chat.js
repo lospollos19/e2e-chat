@@ -2,6 +2,7 @@ const io       = require('socket.io-client');
 const electron = require('electron');
 
 const { SERVER_URL, SOCKET_OPTIONS } = require('./config.js');
+const { deriveAuthSecret } = require('./auth.js');
 
 $(function() {
   electron.ipcRenderer.send('get-user-data');
@@ -490,7 +491,7 @@ function load(userdata) {
   });
 
   socket.on('connect', () => {
-    socket.emit('login', { name: userdata.name, password: userdata.password });
+    socket.emit('login', { name: userdata.name, password: deriveAuthSecret(userdata.name, userdata.password) });
   });
 
   socket.on('disconnect', () => { connected = false; });

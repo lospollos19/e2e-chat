@@ -2,6 +2,7 @@ const ipcRenderer = require('electron').ipcRenderer;
 const { SERVER_URL, SOCKET_OPTIONS } = require('./config.js');
 const socket      = require('socket.io-client')(SERVER_URL, SOCKET_OPTIONS);
 const crypto      = require('crypto');
+const { deriveAuthSecret } = require('./auth.js');
 
 let currentName              = null;
 let currentPassword          = null;
@@ -10,7 +11,7 @@ let pendingEncryptedPrivKey  = null;
 function login() {
     currentName     = document.getElementById("inputUserName").value;
     currentPassword = document.getElementById("inputPassword").value;
-    socket.emit('login', { name: currentName, password: currentPassword });
+    socket.emit('login', { name: currentName, password: deriveAuthSecret(currentName, currentPassword) });
 }
 
 function validate(name, password) {
@@ -54,7 +55,7 @@ function register() {
     };
     socket.emit('register', {
         name:                currentName,
-        password:            currentPassword,
+        password:            deriveAuthSecret(currentName, currentPassword),
         publicKey:           publicKey,
         encryptedPrivateKey: pendingEncryptedPrivKey
     });
